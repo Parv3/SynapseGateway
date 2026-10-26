@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     CACHE_SIMILARITY_THRESHOLD: float = 0.90  # Cosine similarity (0.0 to 1.0)
     CACHE_MAX_ENTRIES: int = 10000
     CACHE_EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
+    USE_LOCAL_ONNX: bool = False  # Set to True in production to download & use full ONNX model
     
     # Guardrails
     GUARDRAILS_ENABLED: bool = True

@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  gateway:
+    build: .
+    container_name: synapse-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - CACHE_SIMILARITY_THRESHOLD=0.90
+      - REQUEST_TIMEOUT_SEC=30.0
+      - USE_LOCAL_ONNX=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

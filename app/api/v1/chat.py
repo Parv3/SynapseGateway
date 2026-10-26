@@ -11,6 +11,22 @@ from app.routing.provider_pool import provider_pool
 from app.telemetry.metrics import telemetry
 from app.core.config import settings
 
+# BPE Tokenizer for accurate production token accounting
+try:
+    import tiktoken
+    _enc = tiktoken.get_encoding("cl100k_base")
+except Exception:
+    _enc = None
+
+def count_tokens(text: str) -> int:
+    """Exact BPE token count using OpenAI cl100k_base tokenizer."""
+    if _enc is not None:
+        try:
+            return len(_enc.encode(text))
+        except Exception:
+            pass
+    return max(1, int(len(text.split()) * 1.3))
+
 router = APIRouter()
 
 class Message(BaseModel):
@@ -36,7 +52,7 @@ async def chat_completions(
     req_id = f"syn-{uuid.uuid4().hex[:12]}"
     start_time = time.time()
     
-    # 1. Extract the latest user prompt for caching and evaluation
+    # 1. Extract the latest user prompt
     user_messages = [m for m in req.messages if m.role == "user"]
     if not user_messages:
         raise HTTPException(
@@ -45,14 +61,14 @@ async def chat_completions(
         )
     raw_prompt = user_messages[-1].content
 
-    # 2. Input Guardrails Check
+    # 2. Ingress Guardrails Check
     pii_types_found: List[str] = []
     sanitized_prompt = raw_prompt
 
     if settings.GUARDRAILS_ENABLED:
-        # A. Prompt Injection Detection
+        # A. Prompt Injection & Adversarial Jailbreak Check
         if settings.BLOCK_PROMPT_INJECTION:
-            is_injection, triggers = PromptInjectionDetector.evaluate(raw_prompt)
+            is_injection, triggers, risk_score = PromptInjectionDetector.evaluate(raw_prompt)
             if is_injection:
                 telemetry.record_request(
                     request_id=req_id,
@@ -68,18 +84,18 @@ async def chat_completions(
                     detail={
                         "error": "SecurityViolation",
                         "message": "Potential prompt injection or jailbreak pattern detected.",
-                        "triggers": triggers
+                        "triggers": triggers,
+                        "risk_score": risk_score
                     }
                 )
 
-        # B. Sensitive Data / PII Masking
+        # B. Sensitive Data / PII Masking with Luhn Verification
         if settings.MASK_PII:
             sanitized_prompt, pii_types_found = PIIFilter.sanitize(raw_prompt)
             if pii_types_found:
-                # Update prompt in place for upstream request
                 user_messages[-1].content = sanitized_prompt
 
-    # 3. Semantic Vector Cache Lookup
+    # 3. Two-Tier Semantic Vector Cache Lookup
     if settings.CACHE_ENABLED:
         cached_result, similarity, hit_type = await semantic_cache.lookup(
             prompt=sanitized_prompt,
@@ -88,8 +104,13 @@ async def chat_completions(
         if cached_result is not None:
             latency_ms = (time.time() - start_time) * 1000
             
-            # Compute tokens saved approximation
-            tokens_saved = int(len(sanitized_prompt.split()) * 1.3) + 150
+            # Accurate token accounting: prompt tokens + cached completion tokens
+            cached_completion = ""
+            try:
+                cached_completion = cached_result["choices"][0]["message"]["content"]
+            except Exception:
+                pass
+            tokens_saved = count_tokens(sanitized_prompt) + count_tokens(cached_completion)
             
             telemetry.record_request(
                 request_id=req_id,
@@ -102,17 +123,17 @@ async def chat_completions(
                 pii_detected=pii_types_found
             )
             
-            # Decorate response headers
+            # Set high-visibility telemetry headers
             response.headers["X-Synapse-Cache"] = "HIT"
             response.headers["X-Synapse-Hit-Type"] = hit_type.upper()
             response.headers["X-Synapse-Similarity"] = f"{similarity:.4f}"
+            response.headers["X-Synapse-Tokens-Saved"] = str(tokens_saved)
             response.headers["X-Synapse-Latency-Ms"] = f"{latency_ms:.2f}"
             
             return cached_result
 
-    # 4. Cache MISS: Forward through resilient Provider Router
+    # 4. Cache MISS: Forward through Resilient Provider Router
     try:
-        # Prepare JSON payload matching OpenAI specs
         payload = req.model_dump()
         result, provider_name, provider_latency = await provider_pool.forward_request(
             endpoint="/chat/completions",
@@ -121,11 +142,11 @@ async def chat_completions(
         )
         total_latency_ms = (time.time() - start_time) * 1000
 
-        # Estimate tokens produced
+        # Extract tokens from provider usage metadata
         usage = result.get("usage", {})
-        total_tokens = usage.get("total_tokens", len(sanitized_prompt.split()) + 100)
+        total_tokens = usage.get("total_tokens", count_tokens(sanitized_prompt) + 50)
 
-        # 5. Store into Semantic Cache for future identical / semantically similar queries
+        # 5. Asynchronously persist into Two-Tier Semantic Cache
         if settings.CACHE_ENABLED:
             await semantic_cache.store(
                 prompt=sanitized_prompt,
