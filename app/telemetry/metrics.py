@@ -1,7 +1,7 @@
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 @dataclass
 class RequestLog:
@@ -19,7 +19,7 @@ class RequestLog:
 class TelemetryCollector:
     """
     Central in-memory metrics and telemetry aggregation.
-    Provides live data feeds for the UI dashboard.
+    Provides live data feeds for the UI dashboard with O(1) ring buffers.
     """
     def __init__(self, max_recent_logs: int = 100):
         self.max_recent_logs = max_recent_logs
@@ -31,9 +31,9 @@ class TelemetryCollector:
         self.total_blocked_injections: int = 0
         self.total_pii_masked: int = 0
         
-        # Latency tracking
-        self.cache_latencies: List[float] = []
-        self.provider_latencies: List[float] = []
+        # O(1) rolling latency tracking
+        self.cache_latencies: deque = deque(maxlen=500)
+        self.provider_latencies: deque = deque(maxlen=500)
 
     def record_request(
         self,
@@ -44,19 +44,15 @@ class TelemetryCollector:
         latency_ms: float,
         source: str,
         tokens_saved: int = 0,
-        pii_detected: List[str] = None,
+        pii_detected: Optional[List[str]] = None,
         is_injection: bool = False
     ) -> None:
         self.total_requests += 1
         if "cache" in source:
             self.total_cache_hits += 1
             self.cache_latencies.append(latency_ms)
-            if len(self.cache_latencies) > 500:
-                self.cache_latencies.pop(0)
         else:
             self.provider_latencies.append(latency_ms)
-            if len(self.provider_latencies) > 500:
-                self.provider_latencies.pop(0)
 
         self.total_tokens_saved += tokens_saved
         if is_injection:
@@ -82,7 +78,7 @@ class TelemetryCollector:
         avg_cache_lat = round(sum(self.cache_latencies) / len(self.cache_latencies), 2) if self.cache_latencies else 0.0
         avg_prov_lat = round(sum(self.provider_latencies) / len(self.provider_latencies), 2) if self.provider_latencies else 0.0
         
-        # Standard pricing estimate (~$0.01 per 1k tokens for blended GPT-4o-mini / Claude Haiku)
+        # Estimated cost saved ($0.01 per 1k tokens standard blended pricing)
         cost_saved_usd = round((self.total_tokens_saved / 1000) * 0.01, 4)
 
         return {

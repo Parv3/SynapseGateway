@@ -47,13 +47,19 @@ class PIIFilter:
         detected: List[str] = []
         sanitized_text = text
 
-        # 1. First check candidate credit cards with Luhn verification
+        # 1. Check candidate credit cards with Luhn verification
         for candidate in cls.CC_CANDIDATE.findall(sanitized_text):
             digits_only = re.sub(r'\D', '', candidate)
             if cls.luhn_checksum_valid(digits_only):
                 if "CREDIT_CARD" not in detected:
                     detected.append("CREDIT_CARD")
-                sanitized_text = sanitized_text.replace(candidate.strip(), "[REDACTED:CREDIT_CARD]")
+                # Precise boundary-safe replacement
+                clean_target = candidate.strip()
+                sanitized_text = re.sub(
+                    r'(?<!\d)' + re.escape(clean_target) + r'(?!\d)',
+                    "[REDACTED:CREDIT_CARD]",
+                    sanitized_text
+                )
 
         # 2. Check secret tokens and standard PII
         for pii_type, pattern in cls.SECRET_PATTERNS.items():

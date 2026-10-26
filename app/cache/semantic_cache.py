@@ -81,7 +81,7 @@ class SemanticCache:
                 self.misses += 1
                 return None, None, "miss"
 
-            # SIMD matrix-vector dot product computes cosine similarity across all cached vectors in single call
+            # SIMD matrix-vector dot product computes cosine similarity across all cached vectors
             similarities = np.dot(self._vectors_matrix, query_vector)
             best_idx = int(np.argmax(similarities))
             best_score = float(similarities[best_idx])
@@ -102,7 +102,7 @@ class SemanticCache:
 
     async def store(self, prompt: str, model: str, response_payload: Dict[str, Any], tokens_saved: int = 0) -> None:
         """
-        Inserts new entry into cache with LRU eviction enforcement.
+        Inserts or updates an entry in the cache with LRU eviction enforcement.
         """
         query_vector = self.embed_engine.embed_text(prompt)
         key = self._hash_key(prompt, model)
@@ -118,17 +118,15 @@ class SemanticCache:
         )
 
         async with self._lock:
-            # Enforce LRU eviction if at capacity
-            if len(self._cache_map) >= self.max_entries:
-                oldest_key, _ = self._cache_map.popitem(last=False)
-                # Rebuild entry list
-                self._entry_list = list(self._cache_map.values())
-                if self._entry_list:
-                    self._vectors_matrix = np.vstack([e.vector for e in self._entry_list])
-                else:
-                    self._vectors_matrix = None
+            is_new = key not in self._cache_map
+            # Evict oldest item only if inserting a new key and at max capacity
+            if is_new and len(self._cache_map) >= self.max_entries:
+                self._cache_map.popitem(last=False)
 
             self._cache_map[key] = entry
+            self._cache_map.move_to_end(key)
+            
+            # Atomic synchronization of entry list and BLAS matrix
             self._entry_list = list(self._cache_map.values())
             self._vectors_matrix = np.vstack([e.vector for e in self._entry_list])
 

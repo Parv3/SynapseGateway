@@ -150,4 +150,8 @@ class ProviderPool:
     def pool_status(self) -> List[dict]:
         return [p.breaker.status() for p in self.providers.values()]
 
+    async def aclose(self) -> None:
+        """Cleanly releases underlying HTTP connection pools."""
+        await self.client.aclose()
+
 provider_pool = ProviderPool()

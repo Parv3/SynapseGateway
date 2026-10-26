@@ -13,10 +13,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger("synapse.main")
 
+from contextlib import asynccontextmanager
+from app.routing.provider_pool import provider_pool
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("SynapseGateway starting up...")
+    yield
+    # Graceful Shutdown
+    logger.info("SynapseGateway shutting down. Closing provider connection pools...")
+    await provider_pool.aclose()
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
-    description="High-Throughput Distributed AI Gateway with Semantic Caching, Guardrails & Circuit Breaking"
+    description="High-Throughput Distributed AI Gateway with Semantic Caching, Guardrails & Circuit Breaking",
+    lifespan=lifespan
 )
 
 # Enforce secure CORS policy
