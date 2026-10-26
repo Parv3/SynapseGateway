@@ -119,16 +119,22 @@ class SemanticCache:
 
         async with self._lock:
             is_new = key not in self._cache_map
+            needs_full_rebuild = False
+
             # Evict oldest item only if inserting a new key and at max capacity
             if is_new and len(self._cache_map) >= self.max_entries:
                 self._cache_map.popitem(last=False)
+                needs_full_rebuild = True
 
             self._cache_map[key] = entry
             self._cache_map.move_to_end(key)
-            
-            # Atomic synchronization of entry list and BLAS matrix
             self._entry_list = list(self._cache_map.values())
-            self._vectors_matrix = np.vstack([e.vector for e in self._entry_list])
+
+            # Fast matrix append when appending without eviction
+            if needs_full_rebuild or self._vectors_matrix is None or not is_new:
+                self._vectors_matrix = np.vstack([e.vector for e in self._entry_list])
+            else:
+                self._vectors_matrix = np.vstack([self._vectors_matrix, query_vector.reshape(1, -1)])
 
     def stats(self) -> Dict[str, Any]:
         total_hits = self.exact_hits + self.semantic_hits

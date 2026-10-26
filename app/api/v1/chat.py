@@ -2,7 +2,10 @@ import time
 import uuid
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Request, HTTPException, status, Response
-from pydantic import BaseModel, Field
+from fastapi.responses import StreamingResponse
+import json
+import asyncio
+from pydantic import BaseModel, Field, ConfigDict
 
 from app.cache.semantic_cache import semantic_cache
 from app.guardrails.pii_filter import PIIFilter
@@ -43,8 +46,7 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = 1024
     stream: Optional[bool] = False
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 @router.post("/chat/completions", dependencies=[Depends(verify_gateway_api_key)])
 async def chat_completions(
@@ -127,12 +129,58 @@ async def chat_completions(
             )
             
             # Set high-visibility telemetry headers
-            response.headers["X-Synapse-Cache"] = "HIT"
-            response.headers["X-Synapse-Hit-Type"] = hit_type.upper()
-            response.headers["X-Synapse-Similarity"] = f"{similarity:.4f}"
-            response.headers["X-Synapse-Tokens-Saved"] = str(tokens_saved)
-            response.headers["X-Synapse-Latency-Ms"] = f"{latency_ms:.2f}"
-            
+            response_headers = {
+                "X-Synapse-Cache": "HIT",
+                "X-Synapse-Hit-Type": hit_type.upper(),
+                "X-Synapse-Similarity": f"{similarity:.4f}",
+                "X-Synapse-Tokens-Saved": str(tokens_saved),
+                "X-Synapse-Latency-Ms": f"{latency_ms:.2f}"
+            }
+
+            if req.stream:
+                async def stream_cached_sse():
+                    content = ""
+                    try:
+                        content = cached_result["choices"][0]["message"]["content"]
+                    except Exception:
+                        content = str(cached_result)
+
+                    words = content.split(" ")
+                    for i, word in enumerate(words):
+                        chunk = {
+                            "id": f"chatcmpl-{req_id}",
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": req.model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": word + (" " if i < len(words) - 1 else "")},
+                                    "finish_reason": None
+                                }
+                            ]
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                        await asyncio.sleep(0.005)
+
+                    done_chunk = {
+                        "id": f"chatcmpl-{req_id}",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": req.model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                    }
+                    yield f"data: {json.dumps(done_chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(
+                    stream_cached_sse(),
+                    media_type="text/event-stream",
+                    headers=response_headers
+                )
+
+            for k, v in response_headers.items():
+                response.headers[k] = v
             return cached_result
 
     # 4. Cache MISS: Forward through Resilient Provider Router

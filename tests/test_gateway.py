@@ -80,3 +80,27 @@ async def test_semantic_cache_lru_and_vector():
     assert res is not None
     assert hit_type == "semantic"
     assert sim >= 0.80
+
+@pytest.mark.asyncio
+async def test_streaming_sse_cache_hit():
+    from httpx import AsyncClient, ASGITransport
+    from app.main import app
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # First request primes the cache
+        r1 = await ac.post("/v1/chat/completions", json={
+            "model": "llama-3-8b-instant",
+            "messages": [{"role": "user", "content": "What is reinforcement learning?"}]
+        })
+        assert r1.status_code == 200
+
+        # Second request with stream=True hits the cache and returns text/event-stream
+        r2 = await ac.post("/v1/chat/completions", json={
+            "model": "llama-3-8b-instant",
+            "messages": [{"role": "user", "content": "What is reinforcement learning?"}],
+            "stream": True
+        })
+        assert r2.status_code == 200
+        assert "text/event-stream" in r2.headers.get("content-type", "")
+        assert r2.headers.get("x-synapse-cache") == "HIT"
+        assert "[DONE]" in r2.text

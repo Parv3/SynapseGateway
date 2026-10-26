@@ -28,7 +28,16 @@ class ProviderPool:
     def __init__(self):
         self.providers: Dict[str, Provider] = {}
         self._init_default_providers()
-        self.client = httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_SEC)
+        # Fast 3.5s connect timeout to catch dead endpoints immediately, with configurable read timeout
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                timeout=settings.REQUEST_TIMEOUT_SEC,
+                connect=3.5,
+                read=settings.REQUEST_TIMEOUT_SEC,
+                write=10.0
+            ),
+            limits=httpx.Limits(max_keepalive_connections=50, max_connections=200)
+        )
 
     def _init_default_providers(self):
         # 1. Groq (Ultra-fast Llama-3 inference)
