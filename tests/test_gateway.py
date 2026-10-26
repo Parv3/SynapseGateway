@@ -104,3 +104,61 @@ async def test_streaming_sse_cache_hit():
         assert "text/event-stream" in r2.headers.get("content-type", "")
         assert r2.headers.get("x-synapse-cache") == "HIT"
         assert "[DONE]" in r2.text
+
+@pytest.mark.asyncio
+async def test_multi_tenant_cache_isolation():
+    from httpx import AsyncClient, ASGITransport
+    from app.main import app
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # Tenant A stores a confidential response
+        r_tenant_a = await ac.post(
+            "/v1/chat/completions",
+            headers={"X-Tenant-ID": "tenant-alpha"},
+            json={
+                "model": "llama-3-8b-instant",
+                "messages": [{"role": "user", "content": "What is company Alpha internal Q3 revenue?"}]
+            }
+        )
+        assert r_tenant_a.status_code == 200
+        assert r_tenant_a.headers.get("x-synapse-cache") == "MISS"
+        assert r_tenant_a.headers.get("x-synapse-tenant-id") == "tenant-alpha"
+
+        # Tenant B queries the exact same prompt -> Must MISS to guarantee zero data leakage
+        r_tenant_b = await ac.post(
+            "/v1/chat/completions",
+            headers={"X-Tenant-ID": "tenant-beta"},
+            json={
+                "model": "llama-3-8b-instant",
+                "messages": [{"role": "user", "content": "What is company Alpha internal Q3 revenue?"}]
+            }
+        )
+        assert r_tenant_b.status_code == 200
+        assert r_tenant_b.headers.get("x-synapse-cache") == "MISS"
+        assert r_tenant_b.headers.get("x-synapse-tenant-id") == "tenant-beta"
+
+        # Tenant A queries again -> HITS their own partitioned cache
+        r_tenant_a2 = await ac.post(
+            "/v1/chat/completions",
+            headers={"X-Tenant-ID": "tenant-alpha"},
+            json={
+                "model": "llama-3-8b-instant",
+                "messages": [{"role": "user", "content": "What is company Alpha internal Q3 revenue?"}]
+            }
+        )
+        assert r_tenant_a2.status_code == 200
+        assert r_tenant_a2.headers.get("x-synapse-cache") == "HIT"
+
+@pytest.mark.asyncio
+async def test_dynamic_threshold_tuning():
+    cache = SemanticCache(base_threshold=0.90)
+    
+    # Short ambiguous query should require stricter threshold (> 0.94)
+    short_thresh = cache.compute_dynamic_threshold("help me")
+    assert short_thresh >= 0.94
+
+    # Long multi-clause query should allow slightly more forgiving threshold
+    long_prompt = "Can you please provide a comprehensive breakdown of distributed consensus algorithms including Paxos and Raft?"
+    long_thresh = cache.compute_dynamic_threshold(long_prompt)
+    assert long_thresh <= 0.90
+    assert short_thresh > long_thresh

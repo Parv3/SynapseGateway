@@ -57,7 +57,12 @@ async def chat_completions(
     req_id = f"syn-{uuid.uuid4().hex[:12]}"
     start_time = time.time()
     
-    # 1. Extract the latest user prompt
+    # 1. Extract tenant, user prompt, and system prompt context
+    tenant_id = raw_request.headers.get("X-Tenant-ID", "default")
+    system_messages = [m for m in req.messages if m.role == "system"]
+    system_prompt = system_messages[0].content if system_messages else ""
+    temperature = req.temperature if req.temperature is not None else 0.7
+
     user_messages = [m for m in req.messages if m.role == "user"]
     if not user_messages:
         raise HTTPException(
@@ -100,11 +105,14 @@ async def chat_completions(
             if pii_types_found:
                 user_messages[-1].content = sanitized_prompt
 
-    # 3. Two-Tier Semantic Vector Cache Lookup
+    # 3. Two-Tier Multi-Tenant Semantic Vector Cache Lookup
     if settings.CACHE_ENABLED:
         cached_result, similarity, hit_type = await semantic_cache.lookup(
             prompt=sanitized_prompt,
-            model=req.model
+            model=req.model,
+            tenant_id=tenant_id,
+            system_prompt=system_prompt,
+            temperature=temperature
         )
         if cached_result is not None:
             latency_ms = (time.time() - start_time) * 1000
@@ -134,6 +142,7 @@ async def chat_completions(
                 "X-Synapse-Hit-Type": hit_type.upper(),
                 "X-Synapse-Similarity": f"{similarity:.4f}",
                 "X-Synapse-Tokens-Saved": str(tokens_saved),
+                "X-Synapse-Tenant-ID": tenant_id,
                 "X-Synapse-Latency-Ms": f"{latency_ms:.2f}"
             }
 
@@ -197,13 +206,16 @@ async def chat_completions(
         usage = result.get("usage", {})
         total_tokens = usage.get("total_tokens", count_tokens(sanitized_prompt) + 50)
 
-        # 5. Asynchronously persist into Two-Tier Semantic Cache
+        # 5. Persist into Isolated Multi-Tenant Semantic Cache
         if settings.CACHE_ENABLED:
             await semantic_cache.store(
                 prompt=sanitized_prompt,
                 model=req.model,
                 response_payload=result,
-                tokens_saved=total_tokens
+                tokens_saved=total_tokens,
+                tenant_id=tenant_id,
+                system_prompt=system_prompt,
+                temperature=temperature
             )
 
         telemetry.record_request(
@@ -219,6 +231,7 @@ async def chat_completions(
 
         response.headers["X-Synapse-Cache"] = "MISS"
         response.headers["X-Synapse-Provider"] = provider_name
+        response.headers["X-Synapse-Tenant-ID"] = tenant_id
         response.headers["X-Synapse-Latency-Ms"] = f"{total_latency_ms:.2f}"
         return result
 
