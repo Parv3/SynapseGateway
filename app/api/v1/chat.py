@@ -27,11 +27,14 @@ def count_tokens(text: str) -> int:
             pass
     return max(1, int(len(text.split()) * 1.3))
 
+from app.core.security import verify_gateway_api_key
+from fastapi import Depends
+
 router = APIRouter()
 
 class Message(BaseModel):
     role: str
-    content: str
+    content: str = Field(..., max_length=settings.MAX_PROMPT_LENGTH)
 
 class ChatCompletionRequest(BaseModel):
     model: str = "llama-3-8b-instant"
@@ -43,7 +46,7 @@ class ChatCompletionRequest(BaseModel):
     class Config:
         extra = "allow"
 
-@router.post("/chat/completions")
+@router.post("/chat/completions", dependencies=[Depends(verify_gateway_api_key)])
 async def chat_completions(
     req: ChatCompletionRequest,
     raw_request: Request,

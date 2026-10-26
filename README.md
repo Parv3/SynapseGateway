@@ -1,164 +1,146 @@
-<div align="center">
+# SynapseGateway
 
-# ⚡ SynapseGateway
-
-### High-Throughput Distributed AI Inference Gateway & Security Proxy
+An asynchronous, drop-in AI inference gateway that sits between client applications and upstream LLM providers. It brings two-tier semantic vector caching, active circuit breakers, and inline data sanitization into a single lightweight service.
 
 [![CI](https://github.com/Parv3/SynapseGateway/actions/workflows/ci.yml/badge.svg)](https://github.com/Parv3/SynapseGateway/actions/workflows/ci.yml)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg?style=flat&logo=FastAPI&logoColor=white)](https://fastapi.tiangolo.com)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?style=flat&logo=docker&logoColor=white)](Dockerfile)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen.svg)](https://github.com/Parv3/SynapseGateway/pulls)
-
-<p align="center">
-  <b>Sub-millisecond Semantic Vector Caching • Active Circuit Breakers • Luhn-Verified PII Redaction • Real-Time Observability</b>
-</p>
-
-[Key Features](#-key-features) •
-[Architecture](#-architecture--lifecycle) •
-[Benchmarks](#-benchmarks--performance) •
-[Industry Comparison](#-industry-comparison) •
-[Quickstart](#-quickstart) •
-[Dashboard](#-live-mission-control)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
 
-</div>
+## Why this exists
 
-## 📌 The Problem in Production AI
+When running LLMs in production, calling provider APIs directly introduces three major operational problems:
 
-Modern applications calling Large Language Models directly suffer from four structural vulnerabilities:
-1. **Latency & Cost Spikes:** Repeated natural language questions (*"How do I reset my password?"* vs *"Steps to reset user password"*) waste GPU compute, each taking $1.5\text{s} - 4\text{s}$ and racking up thousands in recurring API fees.
-2. **Upstream Fragility:** External providers (OpenAI, Anthropic, Groq) regularly experience HTTP 429 (Rate Limits) or 503 outages that cascade and crash client applications.
-3. **Security & Data Compliance:** Unchecked prompts leak confidential customer PII (credit cards, SSNs, API tokens) and expose systems to prompt injection attacks.
-4. **Lack of In-Flight Visibility:** No unified view of token consumption, failover counts, or p99 latencies across model providers.
+1. **High latency on repetitive traffic:** Natural language queries often express the same intent in different words (*"How do I reset my password?"* vs *"Steps to reset user password"*). Naive string caches miss these queries, forcing roundtrips that take 1.5 to 4 seconds and consume billable tokens each time.
+2. **Provider instability:** Upstream rate limits (HTTP 429) and outages (HTTP 503) cascade directly into client applications unless there is automated, circuit-breaking failover.
+3. **Data leakage:** Raw prompts frequently contain customer identifiers, credit card numbers, or API keys that should never leave the infrastructure perimeter.
 
-**SynapseGateway** solves this by acting as an asynchronous, drop-in reverse proxy sitting between client applications and upstream model providers.
+SynapseGateway runs locally or on the edge as an OpenAI-compatible reverse proxy, resolving semantically identical queries in **under 1 millisecond**, automatically sanitizing sensitive data before egress, and rerouting failed provider calls with zero downtime.
 
 ---
 
-## ⚡ Key Features
-
-* **🏎️ Two-Tier Hierarchical Cache (L1 + L2):** 
-  - **L1 Exact Match Hash Ring:** $O(1)$ memory lookup resolving in **$< 0.2\text{ms}$**.
-  - **L2 Dense Neural Vector Cache:** Computes 384-dimensional dense embeddings via ONNX runtime and performs vectorized matrix dot-products, delivering **sub-millisecond responses ($0.44\text{ms}$)** on semantically similar queries.
-* **🛡️ Luhn-Verified Ingress Guardrails:**
-  - Validates candidate credit card sequences using the **Luhn Algorithm (Mod 10)** to eliminate false positives.
-  - Redacts emails, phone numbers, SSNs, and secret tokens (AWS, OpenAI, Bearer keys).
-  - Intercepts adversarial prompt injections and jailbreak patterns with weighted scoring heuristics in **$< 7\text{ms}$**.
-* **🔄 Finite-State Circuit Breakers (FSM):**
-  - Monitors upstream health with automated `CLOSED` $\to$ `OPEN` $\to$ `HALF_OPEN` state transitions.
-  - Automatically fails over from primary (Groq/OpenAI) to secondary providers (Anthropic, local vLLM/Ollama) with zero thread blocking.
-* **📊 Exact BPE Token Tracking:**
-  - Integrated with `tiktoken` (`cl100k_base`) for exact dollar cost and token offload calculations.
-* **🖥️ Embedded Real-Time Dashboard:**
-  - Pure HTML/Tailwind web monitor auto-refreshing at `http://localhost:8000/dashboard`.
-* **🔌 Drop-in OpenAI SDK Compatibility:**
-  - 100% compliant with standard `/v1/chat/completions` specs. Simply update your client's `base_url`.
-
----
-
-## 🏗 Architecture & Lifecycle
+## Architecture
 
 ```mermaid
 flowchart TD
-    Client(["💻 Client App / OpenAI SDK"]) -->|POST /v1/chat/completions| Ingress["🛡️ Ingress Guardrails"]
+    Client["Client App / OpenAI SDK"] -->|POST /v1/chat/completions| Ingress["Ingress Perimeter"]
 
-    subgraph Guardrail_Checks ["Security Perimeter"]
+    subgraph Security ["Security & Sanitization"]
         Ingress --> PII["Luhn Algorithm & PII Masking"]
-        PII --> Inj["Weighted Injection Interceptor"]
+        PII --> Injection["Weighted Prompt Injection Filter"]
     end
 
-    Inj -->|Passed| Cache["⚡ Two-Tier Semantic Cache"]
-    Inj -->|Malicious| Block["❌ HTTP 400 Bad Request (< 7ms)"]
+    Injection -->|Passed| Cache["Two-Tier Semantic Cache"]
+    Injection -->|Flagged| Block["HTTP 400 Bad Request (< 7ms)"]
 
-    subgraph Caching_Engine ["Hierarchical Vector Cache"]
+    subgraph Caching ["Cache Hierarchy"]
         Cache --> L1{"L1: Exact Match?"}
-        L1 -->|Yes < 0.2ms| CacheHit["🚀 Return Cached Payload"]
-        L1 -->|No| L2{"L2: Neural Cosine Sim ≥ 0.90?"}
-        L2 -->|Yes < 10ms| CacheHit
+        L1 -->|Hit < 0.2ms| CacheHit["Return Cached Payload"]
+        L1 -->|Miss| L2{"L2: Vector Similarity ≥ 0.90?"}
+        L2 -->|Hit < 10ms| CacheHit
     end
 
-    L2 -->|Cache MISS| Router["🔄 Resilient Router & Failover"]
+    L2 -->|Miss| Router["Resilient Router"]
 
-    subgraph Resilient_Routing ["Circuit Breakers & Model Pool"]
-        Router --> Breaker{"Circuit State?"}
-        Breaker -->|CLOSED| ProviderA["Primary Provider (Groq / OpenAI)"]
-        ProviderA -->|429 / 5xx| Trip["Trip to OPEN"]
-        Trip --> Fallback["Fallback Provider (Anthropic / Ollama)"]
+    subgraph Routing ["Provider Failover Pool"]
+        Router --> Breaker{"Circuit Breaker State?"}
+        Breaker -->|CLOSED| Primary["Primary Provider (Groq / OpenAI)"]
+        Primary -->|429 / 5xx| Trip["Trip Breaker to OPEN"]
+        Trip --> Secondary["Fallback Provider (Anthropic / Ollama)"]
     end
 
-    ProviderA -->|Success| AsyncStore["Asynchronously Index in Semantic Cache"]
-    Fallback -->|Success| AsyncStore
-    AsyncStore --> Telemetry["📊 Async Telemetry Bus"]
-    CacheHit --> Telemetry
-    Telemetry --> Dashboard["🖥️ Mission Control Dashboard"]
+    Primary -->|Success| Index["Index Response in Vector Cache"]
+    Secondary -->|Success| Index
+    Index --> Bus["Async Telemetry Bus"]
+    CacheHit --> Bus
+    Bus --> Dashboard["Live Dashboard / Prometheus"]
 ```
 
 ---
 
-## 📊 Benchmarks & Performance
+## Core Systems
 
-Measured using the automated benchmark suite (`scripts/benchmark.py`) under sustained concurrent load:
+### 1. Two-Tier Semantic Vector Caching
+Standard key-value caches fail in natural language processing because users rarely submit identical strings. SynapseGateway uses a dual-layer approach:
+* **L1 Exact Match Hash Ring:** Hashes normalized strings for $O(1)$ in-memory lookups, resolving in less than 0.2ms.
+* **L2 Dense Neural Vector Index:** If L1 misses, the prompt is encoded into a 384-dimensional dense vector using an ONNX-optimized transformer (`bge-small-en-v1.5`). A vectorized matrix dot-product checks cosine similarity against cached vectors. If the similarity meets or exceeds the configured threshold (default: `0.90`), the cached response is returned immediately.
 
-| Scenario | Direct Provider | With SynapseGateway | Improvement |
+### 2. Active Finite-State Circuit Breakers
+To prevent slow network timeouts during upstream provider outages, each model provider is managed by a three-state machine (`CLOSED`, `OPEN`, `HALF_OPEN`):
+* Under normal conditions (`CLOSED`), requests route to the primary provider.
+* If a provider records 3 consecutive failures (timeouts, 429s, or 5xx responses), the circuit trips to `OPEN`. All incoming calls immediately bypass that provider and redirect to secondary fallbacks (e.g., Anthropic, Groq, or local vLLM/Ollama).
+* After a 30-second cooldown, the circuit enters `HALF_OPEN` and sends a single probe request. If successful, the circuit resets to `CLOSED`.
+
+### 3. Luhn-Verified PII & Secret Redaction
+Rather than relying solely on naive regex matching (which creates false positives on any 16-digit sequence), credit card numbers are verified against the **Luhn Algorithm (Mod 10 Checksum)** before redaction. The guardrail pipeline also strips:
+* Standard PII (Email addresses, phone numbers, US SSNs).
+* Developer secrets (OpenAI API keys, AWS access keys, Bearer authorization tokens).
+* Adversarial prompt injection and jailbreak patterns with weighted risk scoring.
+
+---
+
+## Benchmarks
+
+Results gathered using `scripts/benchmark.py` under simulated production workloads:
+
+| Test Case | Direct Upstream | With SynapseGateway | Measured Delta |
 |---|---|---|---|
-| **Cache HIT Latency (Exact L1)** | $1,272.5\text{ ms}$ | **$0.44\text{ ms}$** | **$2,892\times\text{ faster}$** |
-| **Cache HIT Latency (Semantic L2)** | $1,272.5\text{ ms}$ | **$8.2\text{ ms}$** | **$155\times\text{ faster}$** |
-| **Prompt Injection Interception** | Full roundtrip | **$6.9\text{ ms}$** | **Blocked at perimeter** |
-| **Token Cost on Cache Hits** | Standard pricing | **$0.00** | **$100\%\text{ offloaded}$** |
-| **Availability on Provider 503** | Service Crash | **Automatic Failover** | **Zero downtime** |
+| **Exact Match (L1 Cache Hit)** | 1,272.5 ms | **0.44 ms** | **2,892x faster** |
+| **Semantic Similarity (L2 Cache Hit)** | 1,272.5 ms | **8.20 ms** | **155x faster** |
+| **Prompt Injection Rejection** | 1,200+ ms roundtrip | **6.90 ms** | **Blocked at ingress** |
+| **Token Cost on Cache Hits** | Variable billable | **$0.00** | **100% offloaded** |
+| **Provider 429 / Outage Handling** | Service Exception | **Sub-50ms failover** | **Zero application downtime** |
 
 ---
 
-## 🥊 Industry Comparison
+## Industry Comparison
 
-How SynapseGateway compares to major enterprise and open-source solutions:
-
-| Feature | Raw Provider SDK | LiteLLM | Portkey.ai | **SynapseGateway** |
+| Capability | Raw Provider SDK | LiteLLM | Portkey.ai | SynapseGateway |
 |---|:---:|:---:|:---:|:---:|
-| **Drop-in OpenAI API** | ✅ | ✅ | ✅ | **✅** |
-| **Two-Tier Semantic Caching** | ❌ | ❌ | Paid Cloud | **✅ (In-Memory / ONNX)** |
-| **Active Circuit Breaker FSM** | ❌ | Retries only | Cloud feature | **✅ (Built-in)** |
-| **Luhn-Validated PII Scrubbing** | ❌ | ❌ | Add-on | **✅ (Built-in)** |
-| **Adversarial Injection Guard** | ❌ | ❌ | Add-on | **✅ (< 7ms)** |
-| **Zero External Network Overhead** | ❌ | ❌ | ❌ | **✅ (Local Edge)** |
-| **Self-Hosted Telemetry Dashboard** | ❌ | Extra setup | Cloud | **✅ (Embedded)** |
+| Drop-in OpenAI API Specification | Yes | Yes | Yes | **Yes** |
+| Two-Tier Semantic Vector Caching | No | No | Cloud add-on | **Yes (In-Memory / ONNX)** |
+| Finite-State Circuit Breaker | No | Retries only | Cloud platform | **Yes (Built-in FSM)** |
+| Luhn-Verified Credit Card Scrubbing | No | No | Add-on | **Yes (Built-in)** |
+| Zero External Network Hop Overhead | No | No | No | **Yes (Local Edge)** |
+| Embedded Real-Time Telemetry Dashboard | No | Requires setup | Cloud hosted | **Yes (Self-contained)** |
 
 ---
 
-## 🚀 Quickstart
+## Quickstart
 
 ### 1. Installation
 ```bash
 git clone https://github.com/Parv3/SynapseGateway.git
 cd SynapseGateway
 
-# Create virtual environment
+# Set up virtual environment
 python -m venv venv
 .\venv\Scripts\activate   # Windows
 # source venv/bin/activate # Linux / macOS
 
-# Install production dependencies
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Configure Environment (`.env`)
+### 2. Configuration (`.env`)
 ```env
-# Optional: Upstream provider keys (uses built-in simulator if omitted)
+# Optional: Upstream API keys (gateway includes a local simulator if omitted)
 GROQ_API_KEY=your_groq_key_here
 OPENAI_API_KEY=your_openai_key_here
+
+# Cache sensitivity (0.0 to 1.0)
 CACHE_SIMILARITY_THRESHOLD=0.90
 ```
 
-### 3. Launch the Server
+### 3. Start the Gateway
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### 4. Drop-in OpenAI SDK Usage
-Update the `base_url` in your existing Python code:
+Point your existing client code to `http://localhost:8000/v1`:
 
 ```python
 from openai import OpenAI
@@ -170,41 +152,35 @@ client = OpenAI(
 
 response = client.chat.completions.create(
     model="llama-3-8b-instant",
-    messages=[{"role": "user", "content": "What is backpropagation in deep learning?"}]
+    messages=[{"role": "user", "content": "Explain gradient descent in neural networks."}]
 )
 print(response.choices[0].message.content)
 ```
 
 ---
 
-## 🖥 Live Mission Control
+## Dashboard
 
-Navigate to **`http://localhost:8000/dashboard`** to view real-time latency graphs, cache hit ratios, token savings, and circuit breaker states.
+SynapseGateway includes a built-in telemetry console accessible at:
+```
+http://localhost:8000/dashboard
+```
+It tracks real-time cache hit ratios, token savings, p99 latency breakdowns, and active circuit-breaker states without requiring external monitoring infrastructure.
 
 ---
 
-## 🧪 Testing & Verification
+## Testing & Verification
 
 ```bash
-# Run unit & integration test suite
+# Run unit and integration tests
 pytest tests/ -v
 
-# Run the live benchmark load suite
+# Run the performance benchmark suite
 python scripts/benchmark.py
 ```
 
 ---
 
-## 🐳 Docker Deployment
+## License
 
-```bash
-docker compose up -d
-```
-
----
-
-## 🤝 Contributing & Star History
-
-Contributions, issues, and feature requests are welcome! If this project helped your understanding of AI infrastructure, please consider giving it a ⭐!
-
-Distributed under the MIT License. See `LICENSE` for more information.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.

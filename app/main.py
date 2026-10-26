@@ -1,13 +1,12 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 import logging
 
 from app.api.v1.chat import router as chat_router
 from app.api.v1.telemetry import router as telemetry_router
 from app.core.config import settings
 
-# Configure structured logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -20,14 +19,33 @@ app = FastAPI(
     description="High-Throughput Distributed AI Gateway with Semantic Caching, Guardrails & Circuit Breaking"
 )
 
-# Enable CORS for dashboards & external clients
+# Enforce secure CORS policy
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Synapse-Api-Key"],
 )
+
+# Security Headers & Request Bounds Middleware
+@app.middleware("http")
+async def security_and_bounds_middleware(request: Request, call_next):
+    # Enforce request body size limit to prevent memory exhaustion
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > settings.MAX_PAYLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Payload exceeds limit of {settings.MAX_PAYLOAD_BYTES // 1024} KB."
+        )
+
+    response: Response = await call_next(request)
+    # Modern security headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    return response
 
 # Register API routes
 app.include_router(chat_router, prefix=settings.API_V1_STR, tags=["Chat Completions"])
@@ -44,18 +62,16 @@ async def health_check():
 @app.get("/dashboard", response_class=HTMLResponse, tags=["Dashboard"])
 async def live_dashboard():
     """
-    Embedded, high-speed real-time monitoring dashboard.
-    Auto-refreshes every 2 seconds with live telemetry.
+    Real-time monitoring dashboard with built-in DOM sanitization.
     """
     return """
     <!DOCTYPE html>
     <html lang="en">
     <head>
       <meta charset="UTF-8">
-      <title>SynapseGateway • AI Gateway Mission Control</title>
+      <title>SynapseGateway • Mission Control</title>
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
-      <script src="https://cdn.jsdelivr.net/npm/feather-icons/dist/feather.min.js"></script>
       <style>
         body { background-color: #0B0F17; color: #E2E8F0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         .glass-card { background: rgba(18, 24, 38, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
@@ -71,7 +87,7 @@ async def live_dashboard():
             <div class="flex items-center space-x-3">
               <span class="pulse-dot animate-pulse"></span>
               <h1 class="text-3xl font-bold tracking-tight text-white">Synapse<span class="text-indigo-400">Gateway</span></h1>
-              <span class="text-xs bg-indigo-900 text-indigo-300 font-mono px-2 py-0.5 rounded">v0.1.0-PROD</span>
+              <span class="text-xs bg-indigo-900 text-indigo-300 font-mono px-2 py-0.5 rounded">v0.1.0</span>
             </div>
             <p class="text-sm text-gray-400 mt-1">Distributed AI Inference Gateway • Semantic Vector Caching • Adaptive Guardrails</p>
           </div>
@@ -112,11 +128,8 @@ async def live_dashboard():
 
         <!-- Latency & Provider Grid -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <!-- Latency Comparison -->
           <div class="glass-card p-6 rounded-xl">
-            <h2 class="text-lg font-semibold text-white mb-4 flex items-center space-x-2">
-              <span>Latency Efficiency (Cache vs Upstream)</span>
-            </h2>
+            <h2 class="text-lg font-semibold text-white mb-4">Latency Profile (Cache vs Upstream)</h2>
             <div class="space-y-4">
               <div>
                 <div class="flex justify-between text-xs mb-1">
@@ -138,11 +151,10 @@ async def live_dashboard():
               </div>
             </div>
             <p class="text-xs text-gray-400 mt-4 leading-relaxed">
-              Requests hitting the vector cache eliminate GPU cold starts and API roundtrip latency by up to <strong class="text-green-400">95%</strong>.
+              Requests hitting the vector cache bypass upstream network hops and eliminate recurring token costs.
             </p>
           </div>
 
-          <!-- Circuit Breakers -->
           <div class="glass-card p-6 rounded-xl">
             <h2 class="text-lg font-semibold text-white mb-4">Upstream Circuit Breakers</h2>
             <div id="circuit-list" class="space-y-3">
@@ -179,6 +191,17 @@ async def live_dashboard():
       </div>
 
       <script>
+        // XSS Prevention: Safe HTML entity encoding
+        function escapeHtml(str) {
+          if (!str) return '';
+          return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        }
+
         async function updateDashboard() {
           try {
             const [metricsRes, providersRes] = await Promise.all([
@@ -206,10 +229,10 @@ async def live_dashboard():
             if (providers.providers && providers.providers.length > 0) {
               circuitList.innerHTML = providers.providers.map(p => `
                 <div class="flex items-center justify-between p-3 rounded bg-gray-900 border border-gray-800">
-                  <span class="font-mono text-sm text-gray-200 capitalize">${p.name}</span>
+                  <span class="font-mono text-sm text-gray-200 capitalize">${escapeHtml(p.name)}</span>
                   <div class="flex items-center space-x-2">
                     <span class="text-xs px-2 py-0.5 rounded font-mono ${p.state === 'CLOSED' ? 'bg-green-950 text-green-400 border border-green-800' : 'bg-red-950 text-red-400 border border-red-800'}">
-                      ${p.state}
+                      ${escapeHtml(p.state)}
                     </span>
                     <span class="text-xs text-gray-500 font-mono">fails: ${p.failure_count}</span>
                   </div>
@@ -217,7 +240,7 @@ async def live_dashboard():
               `).join('');
             }
 
-            // Audit Table
+            // Audit Table with strictly sanitized user data
             const tbody = document.getElementById('audit-table-body');
             if (metrics.recent_events && metrics.recent_events.length > 0) {
               tbody.innerHTML = metrics.recent_events.map(ev => {
@@ -225,12 +248,12 @@ async def live_dashboard():
                 if (ev.status.includes('blocked')) badgeClass = 'text-red-400 bg-red-950 border border-red-800';
                 return `
                   <tr class="hover:bg-gray-900 transition">
-                    <td class="py-2.5 text-gray-400">${ev.time}</td>
-                    <td class="py-2.5 text-gray-300">${ev.model}</td>
-                    <td class="py-2.5"><span class="px-2 py-0.5 rounded text-xs ${badgeClass}">${ev.source}</span></td>
-                    <td class="py-2.5 text-gray-200">${ev.latency_ms} ms</td>
-                    <td class="py-2.5 font-bold ${ev.status.includes('blocked') ? 'text-red-400' : 'text-green-400'}">${ev.status}</td>
-                    <td class="py-2.5 text-gray-400 truncate max-w-xs">${ev.prompt}</td>
+                    <td class="py-2.5 text-gray-400">${escapeHtml(ev.time)}</td>
+                    <td class="py-2.5 text-gray-300">${escapeHtml(ev.model)}</td>
+                    <td class="py-2.5"><span class="px-2 py-0.5 rounded text-xs ${badgeClass}">${escapeHtml(ev.source)}</span></td>
+                    <td class="py-2.5 text-gray-200">${Number(ev.latency_ms).toFixed(1)} ms</td>
+                    <td class="py-2.5 font-bold ${ev.status.includes('blocked') ? 'text-red-400' : 'text-green-400'}">${escapeHtml(ev.status)}</td>
+                    <td class="py-2.5 text-gray-400 truncate max-w-xs">${escapeHtml(ev.prompt)}</td>
                   </tr>
                 `;
               }).join('');

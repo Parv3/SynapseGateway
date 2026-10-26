@@ -3,6 +3,8 @@ from app.guardrails.pii_filter import PIIFilter
 from app.guardrails.injection_detector import PromptInjectionDetector
 from app.routing.circuit_breaker import CircuitBreaker, CircuitState
 from app.cache.semantic_cache import SemanticCache
+from app.core.security import verify_gateway_api_key
+from fastapi import HTTPException
 
 @pytest.mark.asyncio
 async def test_pii_filter_and_luhn():
@@ -16,6 +18,14 @@ async def test_pii_filter_and_luhn():
     assert "user@domain.com" not in sanitized
     assert "[REDACTED:EMAIL]" in sanitized
     assert "[REDACTED:CREDIT_CARD]" in sanitized
+
+@pytest.mark.asyncio
+async def test_invalid_credit_card_not_flagged():
+    # Random 16 digits that fail Luhn should NOT be redacted as credit card
+    fake_digits = "1234 5678 9012 3456"
+    assert not PIIFilter.luhn_checksum_valid("1234567890123456")
+    sanitized, pii_types = PIIFilter.sanitize(f"Serial number is {fake_digits}")
+    assert "CREDIT_CARD" not in pii_types
 
 @pytest.mark.asyncio
 async def test_prompt_injection_detector_weighted():
@@ -36,17 +46,15 @@ async def test_circuit_breaker_transitions():
     assert cb.state == CircuitState.CLOSED
     assert cb.can_execute() is True
 
-    # 1st failure -> stays CLOSED
     cb.record_failure()
     assert cb.state == CircuitState.CLOSED
 
-    # 2nd failure -> trips OPEN
     cb.record_failure()
     assert cb.state == CircuitState.OPEN
     assert cb.can_execute() is False
 
 @pytest.mark.asyncio
-async def test_semantic_cache_lru_and_neural_vector():
+async def test_semantic_cache_lru_and_vector():
     cache = SemanticCache(threshold=0.80, max_entries=5)
     
     prompt = "What is the capital of France?"
